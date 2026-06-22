@@ -3,5 +3,6 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LocalDebuggerCommandArguments>-D C:\Users\Admin\AppData\Local\Temp\shader_input</LocalDebuggerCommandArguments>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+    <LocalDebuggerCommandArgumentsHistory>-D C:\Users\Admin\AppData\Local\Temp\shader_input|</LocalDebuggerCommandArgumentsHistory>
   </PropertyGroup>
 </Project>
