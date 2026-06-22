@@ -1599,6 +1599,14 @@ public:
 
 				// mCBufferData includes the actual named variable, as the way to convert numeric offsets
 				// back into proper names.  -cb2[r12.w + 63].xyzx -> _SpotLightDirection[r12.w].xyz
+				// A constant-buffer operand is expected to carry a component swizzle (e.g. cb0[2].w).
+				// If it somehow does not, the strrchr() lookups below would dereference a NULL pointer
+				// and take down the whole decompile as a fatal exception, so bail out cleanly instead.
+				if (strrchr(right2, '.') == NULL)
+				{
+					logDecompileError("Buffer reference missing swizzle: " + string(right2));
+					return;
+				}
 				CBufferData::iterator i = mCBufferData.find((bufIndex << 16) + bufOffset * 16);
 				if (i == mCBufferData.end() && strrchr(right2, '.')[1] == 'y')
 					i = mCBufferData.find((bufIndex << 16) + bufOffset * 16 + 4);
