@@ -1501,10 +1501,22 @@ public:
 				right2[pos] = 0;
 			}
 
-			// Buffer reference?  
+			// Buffer reference?
 			//  This section was doing some char-by-char indexing into the search string 'right2', and has been
 			//  changed to just use sscanf_s as a more reliable way of parsing, although it's a risky change.
 			strPos = strstr(right2, "cb");
+			if (!strPos)
+			{
+				// SM5.1 / RenderDoc style disassembly uses upper-case CB# for constant buffers.
+				// Normalise it back to the lower-case cb# the rest of this routine expects, so the
+				// existing sscanf-based variants below keep working unchanged.
+				strPos = strstr(right2, "CB");
+				if (strPos)
+				{
+					strPos[0] = 'c';
+					strPos[1] = 'b';
+				}
+			}
 			if (strPos)
 			{
 				int bufIndex = 0;
@@ -1946,6 +1958,20 @@ public:
 	// the constant to match.  So, for example, float4(0.5, 0.5, 0, 0) with Texture2D
 	// becomes float2(0.5, 0.5) as the two elements. 
 
+	// Shader model 5.1 (and tools such as RenderDoc) emit resource operands using
+	// upper-case logical names like T0, S0, U0, CB0, while SM4/SM5.0 fxc disassembly
+	// uses lower-case t0, s0, u0, cb0.  This helper pulls the numeric register/logical
+	// index out of either form by skipping any leading resource-type letters, so the
+	// rest of the decompiler can stay agnostic about the casing.
+	static int parseResourceIndex(const char *op)
+	{
+		if (op == NULL)
+			return 0;
+		while (*op && (*op < '0' || *op > '9'))
+			++op;
+		return atoi(op);
+	}
+
 	void truncateTexturePos(char *op, const char *textype)
 	{
 		char *cpos;
@@ -1990,6 +2016,15 @@ public:
 			else if (!strncmp(textype, "Texture3D<", strlen("Texture3D<"))) pos = 4;
 			else if (!strncmp(textype, "TextureCube<", strlen("TextureCube<"))) pos = 4;
 			else if (!strncmp(textype, "TextureCubeArray<", strlen("TextureCubeArray<"))) pos = 5;	// float4 .xyzw
+			// Read/write (UAV) variants, e.g. RWTexture2D used with sample-style truncation.
+			else if (!strncmp(textype, "RWTexture1D<", strlen("RWTexture1D<"))) pos = 2;
+			else if (!strncmp(textype, "RWTexture1DArray<", strlen("RWTexture1DArray<"))) pos = 3;
+			else if (!strncmp(textype, "RWTexture2D<", strlen("RWTexture2D<"))) pos = 3;
+			else if (!strncmp(textype, "RWTexture2DArray<", strlen("RWTexture2DArray<"))) pos = 4;
+			else if (!strncmp(textype, "RWTexture3D<", strlen("RWTexture3D<"))) pos = 4;
+			// With reflection stripped we can fail to recover a type; default to float4
+			// (no truncation) rather than aborting the whole decompile.
+			else if (textype[0] == 0) pos = 5;
 			else logDecompileError("  unknown texture type for truncation: " + string(textype));
 			cpos = strrchr(op, '.');
 			cpos[pos] = 0;
@@ -2016,6 +2051,18 @@ public:
 		else if (!strncmp(textype, "Texture2DMSArray<", strlen("Texture2DMSArray<"))) pos = 4;
 		else if (!strncmp(textype, "Texture2DArray<", strlen("Texture2DArray<"))) pos = 5;	// int4 .xyzw
 		else if (!strncmp(textype, "Texture3D<", strlen("Texture3D<"))) pos = 5;
+		// Read/write (UAV) and raw/structured variants seen in SM5/5.1 shaders.
+		else if (!strncmp(textype, "ByteAddressBuffer", strlen("ByteAddressBuffer"))) pos = 2;
+		else if (!strncmp(textype, "RWByteAddressBuffer", strlen("RWByteAddressBuffer"))) pos = 2;
+		else if (!strncmp(textype, "RWBuffer<", strlen("RWBuffer<"))) pos = 2;
+		else if (!strncmp(textype, "RWTexture1D<", strlen("RWTexture1D<"))) pos = 3;
+		else if (!strncmp(textype, "RWTexture1DArray<", strlen("RWTexture1DArray<"))) pos = 4;
+		else if (!strncmp(textype, "RWTexture2D<", strlen("RWTexture2D<"))) pos = 4;
+		else if (!strncmp(textype, "RWTexture2DArray<", strlen("RWTexture2DArray<"))) pos = 5;
+		else if (!strncmp(textype, "RWTexture3D<", strlen("RWTexture3D<"))) pos = 5;
+		// With reflection stripped we can fail to recover a type; default to int4
+		// (no truncation) rather than aborting the whole decompile.
+		else if (textype[0] == 0) pos = 5;
 		else logDecompileError("  unknown texture type for truncation: " + string(textype));
 		char *cpos = strrchr(op, '.');
 		cpos[pos] = 0;
@@ -3095,14 +3142,9 @@ public:
 			// there is no Resource Binding section in the shader.  TODO: probably needs to handle arrays too.
 			else if (!strcmp(statement, "dcl_sampler"))
 			{
-				if (op1[0] == 's')
+				if (op1[0] == 's' || op1[0] == 'S')
 				{
-					int bufIndex = 0;
-					if (sscanf_s(op1, "s%d", &bufIndex) != 1)
-					{
-						logDecompileError("Error parsing sampler register index: " + string(op1));
-						return;
-					}
+					int bufIndex = parseResourceIndex(op1);
 					if (!strcmp(op2, "mode_default"))
 					{
 						map<int, string>::iterator i = mSamplerNames.find(bufIndex);
@@ -3144,7 +3186,7 @@ public:
 			// Also unlikely to work for the (mixed,mixed,mixed,mixed) case.  <mixed4> will be wrong.
 			else if (!strcmp(statement, "dcl_resource_texture2d"))
 			{
-				if (op2[0] == 't')
+				if (op2[0] == 't' || op2[0] == 'T')
 				{
 					int bufIndex = 0;
 					if (sscanf_s(op2 + 1, "%d", &bufIndex) != 1)
@@ -3162,7 +3204,7 @@ public:
 			}
 			else if (!strcmp(statement, "dcl_resource_texture2darray"))	// dcl_resource_texture2darray (float,float,float,float) t0
 			{
-				if (op2[0] == 't')
+				if (op2[0] == 't' || op2[0] == 'T')
 				{
 					int bufIndex = 0;
 					if (sscanf_s(op2 + 1, "%d", &bufIndex) != 1)
@@ -3180,7 +3222,7 @@ public:
 			}
 			else if (!strncmp(statement, "dcl_resource_texture2dms", strlen("dcl_resource_texture2dms")))	// dcl_resource_texture2dms(8) (float,float,float,float) t4
 			{
-				if (op2[0] == 't')
+				if (op2[0] == 't' || op2[0] == 'T')
 				{
 					int bufIndex = 0;
 					if (sscanf_s(op2 + 1, "%d", &bufIndex) != 1)
@@ -3217,7 +3259,7 @@ public:
 			}
 			else if (!strcmp(statement, "dcl_resource_texture3d"))
 			{
-				if (op2[0] == 't')
+				if (op2[0] == 't' || op2[0] == 'T')
 				{
 					int bufIndex = 0;
 					if (sscanf_s(op2 + 1, "%d", &bufIndex) != 1)
@@ -3235,7 +3277,7 @@ public:
 			}
 			else if (!strcmp(statement, "dcl_resource_texturecube"))
 			{
-				if (op2[0] == 't')
+				if (op2[0] == 't' || op2[0] == 'T')
 				{
 					int bufIndex = 0;
 					if (sscanf_s(op2 + 1, "%d", &bufIndex) != 1)
@@ -3253,7 +3295,7 @@ public:
 			}
 			else if (!strcmp(statement, "dcl_resource_texturecubearray"))
 			{
-				if (op2[0] == 't')
+				if (op2[0] == 't' || op2[0] == 'T')
 				{
 					int bufIndex = 0;
 					if (sscanf_s(op2 + 1, "%d", &bufIndex) != 1)
@@ -3271,7 +3313,7 @@ public:
 			}
 			else if (!strcmp(statement, "dcl_resource_buffer"))		// dcl_resource_buffer (sint,sint,sint,sint) t2
 			{
-				if (op2[0] == 't')
+				if (op2[0] == 't' || op2[0] == 'T')
 				{
 					int bufIndex = 0;
 					if (sscanf_s(op2 + 1, "%d", &bufIndex) != 1)
@@ -3286,6 +3328,78 @@ public:
 						CreateRawFormat("Buffer", bufIndex);
 					}
 				}
+			}
+			// SM5/5.1 structured and raw buffer resources.  These use the texture (t#)
+			// register space, and the resource name sits in op1 (e.g. "T0,") with the
+			// element stride following.  With reflection stripped we can only emit a
+			// best-effort <float4> / ByteAddressBuffer declaration, but recording the
+			// type here keeps the .Load() truncation logic from failing.
+			else if (!strcmp(statement, "dcl_resource_structured"))		// dcl_resource_structured T0, 16 space=0,reg=0
+			{
+				if (op1[0] == 't' || op1[0] == 'T')
+				{
+					int bufIndex = parseResourceIndex(op1);
+					if (mTextureNames.find(bufIndex) == mTextureNames.end())
+					{
+						sprintf(buffer, "t%d", bufIndex);
+						mTextureNames[bufIndex] = buffer;
+						mTextureType[bufIndex] = "StructuredBuffer<float4>";
+						sprintf(buffer, "StructuredBuffer<float4> t%d : register(t%d);\n\n", bufIndex, bufIndex);
+						mOutput.insert(mOutput.begin(), buffer, buffer + strlen(buffer));
+						mCodeStartPos += strlen(buffer);
+					}
+				}
+			}
+			else if (!strcmp(statement, "dcl_resource_raw"))			// dcl_resource_raw T0 space=0,reg=0
+			{
+				if (op1[0] == 't' || op1[0] == 'T')
+				{
+					int bufIndex = parseResourceIndex(op1);
+					if (mTextureNames.find(bufIndex) == mTextureNames.end())
+					{
+						sprintf(buffer, "t%d", bufIndex);
+						mTextureNames[bufIndex] = buffer;
+						mTextureType[bufIndex] = "ByteAddressBuffer";
+						sprintf(buffer, "ByteAddressBuffer t%d : register(t%d);\n\n", bufIndex, bufIndex);
+						mOutput.insert(mOutput.begin(), buffer, buffer + strlen(buffer));
+						mCodeStartPos += strlen(buffer);
+					}
+				}
+			}
+			// Typed UAV resources (RWTexture / RWBuffer).  These live in the u# register
+			// space and the current opcode handlers for them are stubs, so we only emit a
+			// reference declaration rather than registering them in the texture maps.
+			else if (!strncmp(statement, "dcl_uav_typed_", strlen("dcl_uav_typed_")))
+			{
+				const char *dim = statement + strlen("dcl_uav_typed_");
+				const char *rwType = "RWTexture2D";
+				if (!strcmp(dim, "buffer")) rwType = "RWBuffer";
+				else if (!strcmp(dim, "texture1d")) rwType = "RWTexture1D";
+				else if (!strcmp(dim, "texture1darray")) rwType = "RWTexture1DArray";
+				else if (!strcmp(dim, "texture2d")) rwType = "RWTexture2D";
+				else if (!strcmp(dim, "texture2darray")) rwType = "RWTexture2DArray";
+				else if (!strcmp(dim, "texture3d")) rwType = "RWTexture3D";
+
+				int uavIndex = parseResourceIndex(op2);		// (float,float,float,float) U0 ...
+				char format[16] = "float";
+				sscanf_s(op1, "(%[^,]", format, 16);		// match first xx of (xx,xx,xx,xx)
+				sprintf(buffer, "%s<%s4> u%d : register(u%d);\n\n", rwType, format, uavIndex, uavIndex);
+				mOutput.insert(mOutput.begin(), buffer, buffer + strlen(buffer));
+				mCodeStartPos += strlen(buffer);
+			}
+			else if (!strcmp(statement, "dcl_uav_structured"))			// dcl_uav_structured U0, 16 space=0,reg=0
+			{
+				int uavIndex = parseResourceIndex(op1);
+				sprintf(buffer, "RWStructuredBuffer<float4> u%d : register(u%d);\n\n", uavIndex, uavIndex);
+				mOutput.insert(mOutput.begin(), buffer, buffer + strlen(buffer));
+				mCodeStartPos += strlen(buffer);
+			}
+			else if (!strcmp(statement, "dcl_uav_raw"))				// dcl_uav_raw U0 space=0,reg=0
+			{
+				int uavIndex = parseResourceIndex(op1);
+				sprintf(buffer, "RWByteAddressBuffer u%d : register(u%d);\n\n", uavIndex, uavIndex);
+				mOutput.insert(mOutput.begin(), buffer, buffer + strlen(buffer));
+				mCodeStartPos += strlen(buffer);
 			}
 			else if (!strcmp(statement, "{"))
 			{
@@ -4553,8 +4667,8 @@ public:
 						applySwizzle(".xyzw", op2);
 						applySwizzle(op1, op3);
 						int textureId, samplerId;
-						sscanf_s(op3, "t%d.", &textureId);
-						sscanf_s(op4, "s%d", &samplerId);
+						textureId = parseResourceIndex(op3);
+						samplerId = parseResourceIndex(op4);
 						truncateTexturePos(op2, mTextureType[textureId].c_str());
 						if (!instr->bAddressOffset)
 							sprintf(buffer, "  %s = %s.Sample(%s, %s)%s;\n", writeTarget(op1),
@@ -4580,8 +4694,8 @@ public:
 						applySwizzle(op1, op3);
 						applySwizzle(".x", fixImm(op5, instr->asOperands[4]));
 						int textureId, samplerId;
-						sscanf_s(op3, "t%d.", &textureId);
-						sscanf_s(op4, "s%d", &samplerId);
+						textureId = parseResourceIndex(op3);
+						samplerId = parseResourceIndex(op4);
 						truncateTexturePos(op2, mTextureType[textureId].c_str());
 						if (!instr->bAddressOffset)
 							sprintf(buffer, "  %s = %s.SampleBias(%s, %s, %s)%s;\n", writeTarget(op1),
@@ -4605,8 +4719,8 @@ public:
 						applySwizzle(op1, op3);
 						applySwizzle(".x", fixImm(op5, instr->asOperands[4]));
 						int textureId, samplerId;
-						sscanf_s(op3, "t%d.", &textureId);
-						sscanf_s(op4, "s%d", &samplerId);
+						textureId = parseResourceIndex(op3);
+						samplerId = parseResourceIndex(op4);
 						truncateTexturePos(op2, mTextureType[textureId].c_str());
 						if (!instr->bAddressOffset)
 							sprintf(buffer, "  %s = %s.SampleLevel(%s, %s, %s)%s;\n", writeTarget(op1),
@@ -4631,8 +4745,8 @@ public:
 						applySwizzle(op1, fixImm(op5, instr->asOperands[4]));
 						applySwizzle(op1, fixImm(op6, instr->asOperands[5]));
 						int textureId, samplerId;
-						sscanf_s(op3, "t%d.", &textureId);
-						sscanf_s(op4, "s%d", &samplerId);
+						textureId = parseResourceIndex(op3);
+						samplerId = parseResourceIndex(op4);
 						truncateTexturePos(op2, mTextureType[textureId].c_str());
 						if (!instr->bAddressOffset)
 							sprintf(buffer, "  %s = %s.SampleGrad(%s, %s, %s, %s)%s;\n", writeTarget(op1),
@@ -4656,8 +4770,8 @@ public:
 						applySwizzle(op1, op3);
 						applySwizzle(".x", fixImm(op5, instr->asOperands[4]));
 						int textureId, samplerId;
-						sscanf_s(op3, "t%d.", &textureId);
-						sscanf_s(op4, "s%d", &samplerId);
+						textureId = parseResourceIndex(op3);
+						samplerId = parseResourceIndex(op4);
 						truncateTexturePos(op2, mTextureType[textureId].c_str());
 						if (!instr->bAddressOffset)
 							sprintf(buffer, "  %s = %s.SampleCmp(%s, %s, %s)%s;\n", writeTarget(op1),
@@ -4682,8 +4796,8 @@ public:
 						applySwizzle(op1, op3);
 						applySwizzle(".x", fixImm(op5, instr->asOperands[4]));
 						int textureId, samplerId;
-						sscanf_s(op3, "t%d.", &textureId);
-						sscanf_s(op4, "s%d", &samplerId);
+						textureId = parseResourceIndex(op3);
+						samplerId = parseResourceIndex(op4);
 						truncateTexturePos(op2, mTextureType[textureId].c_str());
 						if (!instr->bAddressOffset)
 							sprintf(buffer, "  %s = %s.SampleCmpLevelZero(%s, %s, %s)%s;\n", writeTarget(op1),
@@ -4708,7 +4822,7 @@ public:
 						applySwizzle(op1, op2);
 						applySwizzle(op1, op3);
 						int textureId;
-						sscanf_s(op2, "t%d.", &textureId);
+						textureId = parseResourceIndex(op2);
 						sprintf(buffer, "  %s = %s.GetSamplePosition(%s);\n", writeTarget(op1),
 							mTextureNames[textureId].c_str(), ci(op3).c_str());
 						appendOutput(buffer);
@@ -4728,8 +4842,8 @@ public:
 						applySwizzle(".xyzw", op2);
 						applySwizzle(op1, op3);
 						int textureId, samplerId;
-						sscanf_s(op3, "t%d.", &textureId);
-						sscanf_s(op4, "s%d", &samplerId);
+						textureId = parseResourceIndex(op3);
+						samplerId = parseResourceIndex(op4);
 						truncateTexturePos(op2, mTextureType[textureId].c_str());
 						char *clamped = strrchr(op3, '.') + 1;
 						if (*clamped == 'x')
@@ -4749,8 +4863,8 @@ public:
 						applySwizzle(".xyzw", op2);
 						applySwizzle(op1, op3);
 						int textureId, samplerId;
-						sscanf_s(op3, "t%d.", &textureId);
-						sscanf_s(op4, "s%d", &samplerId);
+						textureId = parseResourceIndex(op3);
+						samplerId = parseResourceIndex(op4);
 						truncateTexturePos(op2, mTextureType[textureId].c_str());
 						if (!instr->bAddressOffset)
 							sprintf(buffer, "  %s = %s.Gather(%s, %s)%s;\n", writeTarget(op1),
@@ -4774,8 +4888,8 @@ public:
 						applySwizzle(".xyzw", op2);
 						applySwizzle(op1, op3);
 						int textureId, samplerId;
-						sscanf_s(op3, "t%d.", &textureId);
-						sscanf_s(op4, "s%d", &samplerId);
+						textureId = parseResourceIndex(op3);
+						samplerId = parseResourceIndex(op4);
 						truncateTexturePos(op2, mTextureType[textureId].c_str());
 						if (!instr->bAddressOffset)
 							sprintf(buffer, "  %s = %s.GatherCmp(%s, %s, %s)%s;\n", writeTarget(op1),
@@ -4803,8 +4917,8 @@ public:
 						applySwizzle(op1, op3);
 						applySwizzle(op1, op4);
 						int textureId, samplerId;
-						sscanf_s(op4, "t%d.", &textureId);
-						sscanf_s(op5, "s%d", &samplerId);
+						textureId = parseResourceIndex(op4);
+						samplerId = parseResourceIndex(op5);
 						truncateTexturePos(op2, mTextureType[textureId].c_str());
 						sprintf(buffer, "  %s = %s.Gather(%s, %s, %s)%s;\n", writeTarget(op1), mTextureNames[textureId].c_str(), 
 							mSamplerNames[samplerId].c_str(), ci(op2).c_str(), ci(op3).c_str(), strrchr(op4, '.'));
@@ -4821,8 +4935,8 @@ public:
 						applySwizzle(op1, op3);
 						applySwizzle(op1, op4);
 						int textureId, samplerId;
-						sscanf_s(op4, "t%d.", &textureId);
-						sscanf_s(op5, "s%d", &samplerId);
+						textureId = parseResourceIndex(op4);
+						samplerId = parseResourceIndex(op5);
 						truncateTexturePos(op2, mTextureType[textureId].c_str());
 						sprintf(buffer, "  %s = %s.GatherCmp(%s, %s, %s, %s)%s;\n", writeTarget(op1), mTextureNames[textureId].c_str(), 
 							mSamplerComparisonNames[samplerId].c_str(), ci(op2).c_str(), ci(op6).c_str(), ci(op3).c_str(), strrchr(op4, '.'));
@@ -4842,7 +4956,7 @@ public:
 						applySwizzle(".xyzw", op2);
 						applySwizzle(op1, op3);
 						int textureId;
-						sscanf_s(op3, "t%d.", &textureId);
+						textureId = parseResourceIndex(op3);
 						truncateTextureLoadPos(op2, mTextureType[textureId].c_str());
 						if (!instr->bAddressOffset)
 							sprintf(buffer, "  %s = %s.Load(%s)%s;\n", writeTarget(op1), mTextureNames[textureId].c_str(), ci(op2).c_str(), strrchr(op3, '.'));
@@ -4863,7 +4977,7 @@ public:
 						applySwizzle(op1, op3);
 						applySwizzle(".x", fixImm(op4, instr->asOperands[3]), true);
 						int textureId;
-						sscanf_s(op3, "t%d.", &textureId);
+						textureId = parseResourceIndex(op3);
 						truncateTextureLoadPos(op2, mTextureType[textureId].c_str());
 						if (!instr->bAddressOffset)
 							sprintf(buffer, "  %s = %s.Load(%s, %s)%s;\n", writeTarget(op1), mTextureNames[textureId].c_str(), ci(op2).c_str(), ci(op4).c_str(), strrchr(op3, '.'));
@@ -4967,7 +5081,7 @@ public:
 						applySwizzle(".xyzw", op2);	// srcAddress structure
 						applySwizzle(op1, op3);		// byteOffset in structure
 						int textureId;
-						sscanf_s(op4, "t%d.", &textureId);
+						textureId = parseResourceIndex(op4);
 						sprintf(buffer, "  %s[%s].%s = %s;\n", mTextureNames[textureId].c_str(), ci(op2).c_str(), ci(op3).c_str(), writeTarget(op1));
 						appendOutput(buffer);
 						break;
